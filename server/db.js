@@ -68,6 +68,12 @@ export function migrate() {
       role TEXT DEFAULT 'traveler',
       staff_status TEXT DEFAULT 'active',
       privilege_notes TEXT DEFAULT 'Can plan trips and manage personal travel data.',
+      email_verified INTEGER DEFAULT 0,
+      blocked INTEGER DEFAULT 0,
+      reset_token TEXT,
+      reset_token_expires TEXT,
+      verification_token TEXT,
+      last_login_at TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -161,6 +167,101 @@ export function migrate() {
       FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE,
       FOREIGN KEY (stop_id) REFERENCES stops(id) ON DELETE SET NULL
     );
+
+    CREATE TABLE IF NOT EXISTS community_posts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      destination TEXT NOT NULL,
+      caption TEXT NOT NULL,
+      hashtags TEXT DEFAULT '',
+      image_url TEXT NOT NULL,
+      status TEXT DEFAULT 'published',
+      likes INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS community_comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      post_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      body TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (post_id) REFERENCES community_posts(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trip_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      category TEXT NOT NULL,
+      description TEXT NOT NULL,
+      amount REAL NOT NULL,
+      expense_date TEXT NOT NULL,
+      split_with TEXT DEFAULT '[]',
+      receipt_url TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS invoices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trip_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      invoice_number TEXT NOT NULL UNIQUE,
+      status TEXT DEFAULT 'pending',
+      tax_rate REAL DEFAULT 5,
+      discount REAL DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS destinations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      city TEXT NOT NULL,
+      country TEXT NOT NULL,
+      region TEXT NOT NULL,
+      image_url TEXT NOT NULL,
+      featured INTEGER DEFAULT 0,
+      cost_index INTEGER DEFAULT 60,
+      popularity INTEGER DEFAULT 70
+    );
+
+    CREATE TABLE IF NOT EXISTS feedback_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      type TEXT NOT NULL,
+      message TEXT NOT NULL,
+      status TEXT DEFAULT 'open',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      actor_user_id INTEGER,
+      action TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT,
+      metadata TEXT DEFAULT '{}',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS system_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_trips_user_id ON trips(user_id);
+    CREATE INDEX IF NOT EXISTS idx_stops_trip_id ON stops(trip_id);
+    CREATE INDEX IF NOT EXISTS idx_expenses_trip_id ON expenses(trip_id);
+    CREATE INDEX IF NOT EXISTS idx_posts_status_created ON community_posts(status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
   `);
   const columns = raw.exec('PRAGMA table_info(users)')[0]?.values?.map((column) => column[1]) || [];
   const addColumn = (name, definition) => {
@@ -169,6 +270,12 @@ export function migrate() {
   addColumn('role', "TEXT DEFAULT 'traveler'");
   addColumn('staff_status', "TEXT DEFAULT 'active'");
   addColumn('privilege_notes', "TEXT DEFAULT 'Can plan trips and manage personal travel data.'");
+  addColumn('email_verified', 'INTEGER DEFAULT 0');
+  addColumn('blocked', 'INTEGER DEFAULT 0');
+  addColumn('reset_token', 'TEXT');
+  addColumn('reset_token_expires', 'TEXT');
+  addColumn('verification_token', 'TEXT');
+  addColumn('last_login_at', 'TEXT');
   persist();
 }
 

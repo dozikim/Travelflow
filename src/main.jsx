@@ -13,11 +13,24 @@ const palette = ['#0d5c63', '#d69332', '#9f6b4b', '#78a083'];
 
 async function request(path, options = {}) {
   const token = localStorage.getItem('traveloop_token');
+  const method = (options.method || 'GET').toUpperCase();
+  const { _csrfRetry, ...fetchOptions } = options;
+  let csrfToken = sessionStorage.getItem('traveloop_csrf');
+  if (!csrfToken && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const csrfRes = await fetch(`${API}/security/csrf`, { credentials: 'include' });
+    csrfToken = (await csrfRes.json()).csrfToken;
+    sessionStorage.setItem('traveloop_csrf', csrfToken);
+  }
   const res = await fetch(`${API}${path}`, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers || {}) }
+    ...fetchOptions,
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(fetchOptions.headers || {}) }
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 403 && data.error?.toLowerCase().includes('csrf') && !_csrfRetry) {
+    sessionStorage.removeItem('traveloop_csrf');
+    return request(path, { ...options, _csrfRetry: true });
+  }
   if (!res.ok) throw new Error(data.error || 'Something went wrong');
   return data;
 }
@@ -37,8 +50,10 @@ function AuthProvider({ children }) {
     setUser(payload.user);
   };
   const logout = () => {
+    request('/auth/logout', { method: 'POST' }).catch(() => {});
     localStorage.removeItem('traveloop_token');
     localStorage.removeItem('traveloop_user');
+    sessionStorage.removeItem('traveloop_csrf');
     setUser(null);
   };
   return <AuthContext.Provider value={{ user, setUser, login, logout }}>{children}</AuthContext.Provider>;
@@ -50,6 +65,12 @@ const page = { initial: { opacity: 0, y: 14 }, animate: { opacity: 1, y: 0 }, ex
 function Protected({ children }) {
   const { user } = useAuth();
   return user ? children : <Navigate to="/login" replace />;
+}
+
+function AdminProtected({ children }) {
+  const { user } = useAuth();
+  if (!user) return <Navigate to="/login" replace />;
+  return user.role === 'admin' ? children : <Navigate to="/" replace />;
 }
 
 function Shell({ children }) {
@@ -103,9 +124,13 @@ function Login() {
   const { login } = useAuth();
   const navigate = useNavigate();
   const [mode, setMode] = useState('login');
-  const [form, setForm] = useState({ name: 'Mira Shah', firstName: 'Mira', lastName: 'Shah', email: 'mira@traveloop.test', password: 'traveloop123', phone: '+91 98765 43210', city: 'Delhi', country: 'India', photo_url: '', additional: 'Vegetarian meals, aisle seat preferred.' });
+  const [form, setForm] = useState({ name: '', firstName: '', lastName: '', email: '', password: '', newPassword: '', resetToken: '', phone: '', city: '', country: '', photo_url: '', additional: '', captcha: '' });
+  const [captcha, setCaptcha] = useState('');
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  useEffect(() => {
+    if (mode === 'login') request('/security/captcha').then((data) => setCaptcha(data.question)).catch(() => setCaptcha(''));
+  }, [mode]);
   async function submit(e) {
     e.preventDefault();
     setError('');
@@ -113,6 +138,12 @@ function Login() {
       if (mode === 'forgot') {
         const data = await request('/auth/forgot', { method: 'POST', body: JSON.stringify({ email: form.email }) });
         setMessage(data.message);
+        return;
+      }
+      if (mode === 'reset') {
+        await request('/auth/reset', { method: 'POST', body: JSON.stringify({ token: form.resetToken, password: form.newPassword }) });
+        setMessage('Password reset complete. You can sign in now.');
+        setMode('login');
         return;
       }
       const data = await request(`/auth/${mode}`, { method: 'POST', body: JSON.stringify({ ...form, name: `${form.firstName || ''} ${form.lastName || ''}`.trim() || form.name }) });
@@ -124,7 +155,7 @@ function Login() {
     <div className="auth-screen">
       <motion.section {...page} className="auth-card">
         <div className="brand big"><span>TL</span><strong>Traveloop</strong></div>
-        <h1>{mode === 'signup' ? 'Start your next beautiful loop.' : mode === 'forgot' ? 'Reset your route.' : 'Welcome back.'}</h1>
+        <h1>{mode === 'signup' ? 'Start your next beautiful loop.' : mode === 'forgot' || mode === 'reset' ? 'Reset your route.' : 'Welcome back.'}</h1>
         <p>Plan layered itineraries, budgets, notes, and packing lists in one calm travel workspace.</p>
         <form onSubmit={submit}>
         {mode === 'signup' && <div className="registration-grid">
@@ -137,14 +168,20 @@ function Login() {
           <Field label="Additional Information" textarea value={form.additional} onChange={(additional) => setForm({ ...form, additional })} />
         </div>}
           <Field label="Email" type="email" value={form.email} onChange={(email) => setForm({ ...form, email })} />
-          {mode !== 'forgot' && <Field label="Password" type="password" value={form.password} onChange={(password) => setForm({ ...form, password })} />}
+          {mode !== 'forgot' && mode !== 'reset' && <Field label="Password" type="password" value={form.password} onChange={(password) => setForm({ ...form, password })} />}
+          {mode === 'login' && <Field label={`CAPTCHA: ${captcha || 'loading...'}`} value={form.captcha} onChange={(captchaValue) => setForm({ ...form, captcha: captchaValue })} />}
+          {mode === 'reset' && <>
+            <Field label="Reset token" value={form.resetToken} onChange={(resetToken) => setForm({ ...form, resetToken })} />
+            <Field label="New password" type="password" value={form.newPassword} onChange={(newPassword) => setForm({ ...form, newPassword })} />
+          </>}
           {error && <div className="alert danger">{error}</div>}
           {message && <div className="alert">{message}</div>}
-          <button className="primary">{mode === 'signup' ? 'Create account' : mode === 'forgot' ? 'Send reset link' : 'Sign in'}</button>
+          <button className="primary">{mode === 'signup' ? 'Create account' : mode === 'forgot' ? 'Send reset link' : mode === 'reset' ? 'Reset password' : 'Sign in'}</button>
         </form>
         <div className="auth-links">
           <button onClick={() => setMode(mode === 'signup' ? 'login' : 'signup')}>{mode === 'signup' ? 'I already have an account' : 'Create account'}</button>
           <button onClick={() => setMode('forgot')}>Forgot password?</button>
+          <button onClick={() => setMode('reset')}>Have reset token?</button>
         </div>
       </motion.section>
       <section className="auth-art"><img src="https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1400&q=80" alt="" /></section>
@@ -378,28 +415,54 @@ function SettingsPage() {
 
 function Community() {
   const [query, setQuery] = useState('');
-  const [group, setGroup] = useState('All');
-  const posts = [
-    { title: 'Paris cafe route that avoids the crowds', city: 'Paris', type: 'food', author: 'James', body: 'A slow morning loop through Canal Saint-Martin, two bakeries, and a tiny design shop near Republique.' },
-    { title: 'Rome stop: hotel check-in and tram tip', city: 'Rome', type: 'hotel', author: 'Cristina', body: 'Check in after 2pm, ask for room 302, and buy tram tickets before heading to Trastevere.' },
-    { title: 'Paragliding over Interlaken', city: 'Interlaken', type: 'physical activity', author: 'Arjun', body: 'Book the early slot for calmer wind and better lake visibility.' },
-    { title: 'Delhi to Paris flight booking note', city: 'Paris', type: 'travel', author: 'Jerry', body: 'The overnight DEL to PAR flight gave a better first day than the morning connection.' }
-  ];
-  const filtered = posts.filter((post) => (group === 'All' || post.type === group) && `${post.title} ${post.city} ${post.body}`.toLowerCase().includes(query.toLowerCase()));
-  return <motion.section {...page} className="panel"><Header title="Community Tab" subtitle="Shared trip and activity experiences from Traveloop users." /><div className="filters landing-filters"><input placeholder="Search community..." value={query} onChange={(e) => setQuery(e.target.value)} /><select value={group} onChange={(e) => setGroup(e.target.value)}>{['All', 'food', 'hotel', 'travel', 'physical activity'].map((item) => <option key={item}>{item}</option>)}</select><select defaultValue="recent"><option value="recent">Sort by recent</option><option value="city">Sort by city</option></select></div><div className="cards">{filtered.map((post) => <article className="card community-card" key={post.title}><span>{post.type}</span><h3>{post.title}</h3><p>{post.body}</p><small>{post.city} · shared by {post.author}</small><button className="soft">View</button></article>)}</div></motion.section>;
+  const [posts, setPosts] = useState([]);
+  const [form, setForm] = useState({ destination: '', caption: '', hashtags: '', image_url: '' });
+  const [toast, setToast] = useState('');
+  const load = () => request(`/community/posts?q=${encodeURIComponent(query)}`).then(setPosts);
+  useEffect(() => { load(); }, [query]);
+  async function createPost(e) {
+    e.preventDefault();
+    try {
+      const post = await request('/community/posts', { method: 'POST', body: JSON.stringify(form) });
+      setPosts([post, ...posts]);
+      setForm({ destination: '', caption: '', hashtags: '', image_url: '' });
+      setToast('Travel memory posted.');
+    } catch (err) { setToast(err.message); }
+  }
+  async function like(post) {
+    const current = posts;
+    setPosts(posts.map((item) => item.id === post.id ? { ...item, likes: item.likes + 1 } : item));
+    try { await request(`/community/posts/${post.id}/like`, { method: 'POST' }); } catch { setPosts(current); }
+  }
+  return <motion.section {...page} className="panel community-page"><Header title="Travel Community Feed" subtitle="Upload memories, browse destination photos, and discover trending places." />{toast && <div className="alert">{toast}</div>}<form className="community-compose" onSubmit={createPost}><input placeholder="Destination" value={form.destination} onChange={(e) => setForm({ ...form, destination: e.target.value })} /><input placeholder="Image URL" value={form.image_url} onChange={(e) => setForm({ ...form, image_url: e.target.value })} /><textarea placeholder="Caption" value={form.caption} onChange={(e) => setForm({ ...form, caption: e.target.value })} /><input placeholder="#hashtags" value={form.hashtags} onChange={(e) => setForm({ ...form, hashtags: e.target.value })} /><button className="primary">Upload travel memory</button></form><div className="filters"><input placeholder="Search community..." value={query} onChange={(e) => setQuery(e.target.value)} /><select defaultValue="recent"><option value="recent">Sort by recent</option><option value="likes">Sort by likes</option></select></div><div className="masonry-feed">{posts.map((post) => <article className="memory-card" key={post.id}><img loading="lazy" src={post.image_url} alt={post.destination} /><div><span>{post.destination}</span><p>{post.caption}</p><small>{post.hashtags} · {post.author}</small><div className="memory-actions"><button onClick={() => like(post)}>Like {post.likes}</button><button onClick={() => navigator.clipboard.writeText(`${location.origin}/community#post-${post.id}`)}>Share</button><button>Comments {post.comment_count}</button></div></div></article>)}</div></motion.section>;
 }
 
 function Invoices() {
-  const [status, setStatus] = useState('pending');
-  const rows = [
-    { category: 'hotel', description: 'hotel booking paris', details: '3 nights', unit: 3000, amount: 9000 },
-    { category: 'travel', description: 'flight bookings (DEL -> PAR)', details: '1', unit: 12000, amount: 12000 }
-  ];
-  const subtotal = rows.reduce((sum, row) => sum + row.amount, 0);
-  const tax = Math.round(subtotal * 0.05);
-  const discount = 50;
-  const grand = subtotal + tax - discount;
-  return <motion.section {...page} className="invoice-page"><div className="panel"><Header title="Expense Invoice / Billing" subtitle="Trip to Europe Adventure · May 25 - Jan 05, 2025 · 4 cities · created by James" action={<NavLink to="/trips">back to My Trips</NavLink>} /><div className="filters"><input placeholder="Search invoices..." /><select defaultValue="date"><option value="date">Sort</option><option value="amount">Amount</option></select></div><div className="invoice-meta"><Stat label="Invoice Id" value="INV-xyz-30290" /><Stat label="Generated date" value="May 20, 2025" /><Stat label="Payment status" value={status} /></div><div className="traveler-box"><h3>Traveler Details</h3><p>James · Arjun · Jerry · Cristina</p></div><div className="invoice-table"><div className="invoice-row invoice-head"><span>#</span><span>Category</span><span>Description</span><span>Qty/details</span><span>Unit Cost</span><span>Amount</span></div>{rows.map((row, index) => <div className="invoice-row" key={row.description}><span>{index + 1}</span><span>{row.category}</span><span>{row.description}</span><span>{row.details}</span><span>{row.unit}</span><span>{row.amount}</span></div>)}</div><div className="invoice-total"><span>Subtotal</span><strong>$ {subtotal}</strong><span>tax(5%)</span><strong>$ {tax}</strong><span>Discount</span><strong>$ {discount}</strong><span>Grand Total</span><strong>$ {grand}</strong></div><div className="actions invoice-actions"><button>Download Invoice</button><button>Export as PDF</button><button className="primary inline" onClick={() => setStatus('paid')}>Mark as paid</button></div></div><div className="panel"><Header title="budget Insights" /><div className="budget-grid invoice-insight"><div className="chart"><ResponsiveContainer><PieChart><Pie data={[{ name: 'hotel', value: 9000 }, { name: 'travel', value: 12000 }]} dataKey="value" nameKey="name" innerRadius={54}>{palette.slice(0, 2).map((color) => <Cell key={color} fill={color} />)}</Pie><Tooltip /></PieChart></ResponsiveContainer></div><div className="insight-copy"><p>Total Budget: 20000</p><p>total spent: {grand}</p><p>Remaining: {20000 - grand}</p><NavLink className="primary inline" to="/trips">View Full Budget</NavLink></div></div></div></motion.section>;
+  const [trips, setTrips] = useState([]);
+  const [invoices, setInvoices] = useState([]);
+  const [expenses, setExpenses] = useState([]);
+  const [tripId, setTripId] = useState('');
+  const [expense, setExpense] = useState({ category: 'hotel', description: '', amount: 0, expense_date: format(new Date(), 'yyyy-MM-dd'), split_with: [] });
+  const [toast, setToast] = useState('');
+  useEffect(() => { request('/trips').then((rows) => { setTrips(rows); setTripId(rows[0]?.id ? String(rows[0].id) : ''); }); request('/invoices').then(setInvoices); }, []);
+  useEffect(() => { if (tripId) request(`/trips/${tripId}/expenses`).then(setExpenses); }, [tripId]);
+  async function addExpense(e) {
+    e.preventDefault();
+    try {
+      const saved = await request(`/trips/${tripId}/expenses`, { method: 'POST', body: JSON.stringify({ ...expense, amount: Number(expense.amount) }) });
+      setExpenses([saved, ...expenses]);
+      setExpense({ ...expense, description: '', amount: 0 });
+      setToast('Expense saved.');
+    } catch (err) { setToast(err.message); }
+  }
+  async function generateInvoice() {
+    const invoice = await request(`/trips/${tripId}/invoices`, { method: 'POST', body: JSON.stringify({ discount: 0 }) });
+    setInvoices([invoice, ...invoices.filter((item) => item.id !== invoice.id)]);
+    request('/invoices').then(setInvoices);
+  }
+  const subtotal = expenses.reduce((sum, row) => sum + Number(row.amount), 0);
+  const chartData = Object.values(expenses.reduce((acc, row) => ({ ...acc, [row.category]: { name: row.category, value: (acc[row.category]?.value || 0) + Number(row.amount) } }), {}));
+  return <motion.section {...page} className="invoice-page"><div className="panel"><Header title="Expense / Invoice / Billing System" subtitle="Track real trip expenses, split costs, and generate backend PDFs." action={<NavLink to="/trips">back to My Trips</NavLink>} />{toast && <div className="alert">{toast}</div>}<div className="filters"><select value={tripId} onChange={(e) => setTripId(e.target.value)}>{trips.map((trip) => <option value={trip.id} key={trip.id}>{trip.name}</option>)}</select><button className="primary inline" onClick={generateInvoice} disabled={!tripId}>Generate invoice</button></div><form className="expense-form" onSubmit={addExpense}><select value={expense.category} onChange={(e) => setExpense({ ...expense, category: e.target.value })}>{['hotel', 'transport', 'food', 'activities', 'shopping', 'other'].map((item) => <option key={item}>{item}</option>)}</select><input placeholder="Description" value={expense.description} onChange={(e) => setExpense({ ...expense, description: e.target.value })} /><input type="number" placeholder="Amount" value={expense.amount} onChange={(e) => setExpense({ ...expense, amount: e.target.value })} /><input type="date" value={expense.expense_date} onChange={(e) => setExpense({ ...expense, expense_date: e.target.value })} /><button className="primary">Add expense</button></form><div className="invoice-table"><div className="invoice-row invoice-head"><span>#</span><span>Category</span><span>Description</span><span>Date</span><span>Split</span><span>Amount</span></div>{expenses.map((row, index) => <div className="invoice-row" key={row.id}><span>{index + 1}</span><span>{row.category}</span><span>{row.description}</span><span>{row.expense_date}</span><span>{JSON.parse(row.split_with || '[]').join(', ') || '-'}</span><span>${Number(row.amount).toFixed(2)}</span></div>)}</div><div className="invoice-total"><span>Subtotal</span><strong>$ {subtotal.toFixed(2)}</strong><span>tax(5%)</span><strong>$ {(subtotal * .05).toFixed(2)}</strong><span>Grand Total</span><strong>$ {(subtotal * 1.05).toFixed(2)}</strong></div><div className="actions invoice-actions">{invoices.map((invoice) => <a key={invoice.id} className="primary inline" href={`${API}/invoices/${invoice.id}/pdf`} target="_blank" rel="noreferrer">Download {invoice.invoice_number || invoice.id} PDF</a>)}</div></div><div className="panel"><Header title="Budget Insights" /><div className="budget-grid invoice-insight"><div className="chart"><ResponsiveContainer><PieChart><Pie data={chartData} dataKey="value" nameKey="name" innerRadius={54}>{chartData.map((_, index) => <Cell key={index} fill={palette[index % palette.length]} />)}</Pie><Tooltip /></PieChart></ResponsiveContainer></div><div className="insight-copy"><p>Total spent: ${subtotal.toFixed(2)}</p><p>Taxes: ${(subtotal * .05).toFixed(2)}</p><p>Invoice-ready total: ${(subtotal * 1.05).toFixed(2)}</p><NavLink className="primary inline" to="/trips">View Full Budget</NavLink></div></div></div></motion.section>;
 }
 
 function Admin() {
@@ -429,7 +492,7 @@ function Admin() {
   }
   if (error) return <motion.section {...page} className="panel"><Header title="Admin Panel" /><div className="alert danger">{error}</div><p className="muted-line">Sign in as `admin@traveloop.test` to manage staff privileges.</p></motion.section>;
   if (!data) return <Loader />;
-  return <motion.section {...page} className="panel"><Header title="Admin Panel" subtitle="Manage staff privileges, users, popular cities, activities, and travel analytics." /><div className="stat-grid"><Stat label="Trips created" value={data.tripsCreated} /><Stat label="Users" value={data.users} /><Stat label="Top cities tracked" value={data.topCities.length} /></div><div className="admin-layout"><div><Header title="Manage Users" subtitle="Grant admin or staff privileges and control account status." /><div className="staff-table"><div className="staff-row staff-head"><span>User</span><span>Role</span><span>Status</span><span>Privileges</span><span>Trips</span></div>{staff.map((member) => <div className="staff-row" key={member.id}><span><strong>{member.name}</strong><small>{member.email}</small></span><select value={member.role || 'traveler'} onChange={(e) => updateStaff(member, { role: e.target.value })}><option value="admin">admin</option><option value="staff">staff</option><option value="traveler">traveler</option></select><select value={member.staff_status || 'active'} onChange={(e) => updateStaff(member, { staff_status: e.target.value })}><option value="active">active</option><option value="suspended">suspended</option></select><textarea value={member.privilege_notes || ''} onChange={(e) => updateStaff(member, { privilege_notes: e.target.value })} /><span>{member.trip_count}</span></div>)}</div></div><div><Header title="Popular cities" /><div className="chart tall"><ResponsiveContainer><BarChart data={data.topCities}><XAxis dataKey="city" /><YAxis /><Tooltip /><Bar dataKey="count" fill="#d69332" radius={[8, 8, 0, 0]} /></BarChart></ResponsiveContainer></div></div></div></motion.section>;
+  return <motion.section {...page} className="panel admin-panel"><Header title="Admin Panel" subtitle="Manage staff privileges, users, trips, invoices, community moderation, destinations, settings, reports, and audit logs." /><div className="stat-grid"><Stat label="Total users" value={data.users} /><Stat label="Active trips" value={data.activeTrips} /><Stat label="Revenue" value={`$${Number(data.revenue || 0).toFixed(0)}`} /><Stat label="Invoices" value={data.invoices} /></div><div className="admin-layout"><div><Header title="Manage Users" subtitle="Block/unblock users, grant roles, and inspect privileges." /><div className="staff-table"><div className="staff-row staff-head"><span>User</span><span>Role</span><span>Status</span><span>Privileges</span><span>Trips</span></div>{staff.map((member) => <div className="staff-row" key={member.id}><span><strong>{member.name}</strong><small>{member.email}</small><label className="block-toggle"><input type="checkbox" checked={member.blocked} onChange={(e) => updateStaff(member, { blocked: e.target.checked })} />Blocked</label></span><select value={member.role || 'traveler'} onChange={(e) => updateStaff(member, { role: e.target.value })}><option value="admin">admin</option><option value="staff">staff</option><option value="traveler">traveler</option></select><select value={member.staff_status || 'active'} onChange={(e) => updateStaff(member, { staff_status: e.target.value })}><option value="active">active</option><option value="suspended">suspended</option></select><textarea value={member.privilege_notes || ''} onChange={(e) => updateStaff(member, { privilege_notes: e.target.value })} /><span>{member.trip_count}</span></div>)}</div></div><div><Header title="Popular cities" /><div className="chart tall"><ResponsiveContainer><BarChart data={data.topCities}><XAxis dataKey="city" /><YAxis /><Tooltip /><Bar dataKey="count" fill="#d69332" radius={[8, 8, 0, 0]} /></BarChart></ResponsiveContainer></div><Header title="Audit logs" /><div className="audit-list">{data.auditLogs.map((log) => <article key={log.id}><strong>{log.action}</strong><span>{log.actor_name || 'System'} · {log.entity_type} #{log.entity_id}</span><small>{log.created_at}</small></article>)}</div></div></div></motion.section>;
 }
 
 function Header({ title, subtitle, action }) {
@@ -453,7 +516,7 @@ function Loader() {
 }
 
 function App() {
-  return <AuthProvider><BrowserRouter><Routes><Route path="/login" element={<Login />} /><Route path="/share/:slug" element={<PublicTrip />} /><Route path="/*" element={<Protected><Shell><Routes><Route index element={<Dashboard />} /><Route path="create" element={<CreateTrip />} /><Route path="trips" element={<MyTrips />} /><Route path="trips/:id" element={<TripWorkspace />} /><Route path="cities" element={<CitySearch />} /><Route path="activities" element={<ActivitySearch />} /><Route path="community" element={<Community />} /><Route path="invoices" element={<Invoices />} /><Route path="settings" element={<SettingsPage />} /><Route path="admin" element={<Admin />} /></Routes></Shell></Protected>} /></Routes></BrowserRouter></AuthProvider>;
+  return <AuthProvider><BrowserRouter><Routes><Route path="/login" element={<Login />} /><Route path="/share/:slug" element={<PublicTrip />} /><Route path="/*" element={<Protected><Shell><Routes><Route index element={<Dashboard />} /><Route path="create" element={<CreateTrip />} /><Route path="trips" element={<MyTrips />} /><Route path="trips/:id" element={<TripWorkspace />} /><Route path="cities" element={<CitySearch />} /><Route path="activities" element={<ActivitySearch />} /><Route path="community" element={<Community />} /><Route path="invoices" element={<Invoices />} /><Route path="settings" element={<SettingsPage />} /><Route path="admin" element={<AdminProtected><Admin /></AdminProtected>} /></Routes></Shell></Protected>} /></Routes></BrowserRouter></AuthProvider>;
 }
 
 createRoot(document.getElementById('root')).render(<App />);
